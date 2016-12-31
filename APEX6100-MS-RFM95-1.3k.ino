@@ -35,12 +35,13 @@
  *  xx-Dec-2016       TRL - D6100i added support of RFM60_ATC, and new text message for alarm zone type
  *  26-Nov-2016 1.2j  TRL - Changed radio to RFM95 LoRa
  *  20-Dec-2016 1.3k  TRL - Changed radio to RFM95 LoRa, make it work
+ *  20-Dec-2016 1.3l  TRL - Changed radio freq to 928.5Mhz
  *  
  *  
  *
- *  Notes:  1)  Tested with Arduino 1.6.13
+ *  Notes:  1)  Tested with Arduino 1.8.0
  *          2)  Testing using MoteinoMega LoRa Rev1 with RFM95
- *          3)  MySensor 2.1b 4 Dec 2016
+ *          3)  MySensor 2.1 30 Dec 2016
  *
  * Todo:
  *  get time from MQTT and set time in D6100 
@@ -85,7 +86,7 @@
 #define MY_RFM95_TX_POWER               23 // max is 23
 //#define MY_RFM95_ATC_MODE_DISABLED
 #define MY_RFM95_ATC_TARGET_RSSI        (-60)
-#define MY_RFM95_FREQUENCY              (915.0f)
+#define MY_RFM95_FREQUENCY              (928.5f)
 
 
 #ifdef __AVR_ATmega1284P__        // use for Moteino Mega Note: LED on Mega are 1 = on, 0 = off
