@@ -1,10 +1,10 @@
 /*
- *  Ver 1.2k  20 Dec 2016 TRL 
+ *  Ver 1.3m  4 Mar 2017 TRL 
  *  
  *  A program to control an APEX Destiny 6100(AN) Alarm panel. 
  *   This is running on a MoteinoMEGA, so we have lots of memory available
  *   Radio is 915MHz RFM95 LoRa
- *   Tested with MySensor 2.1.0 beta
+ *   Tested with MySensor 2.1.1 
  *   Tested with D6100 firmware 8.07
  *   
  *  Max message size from D6100 is 96 + 10 bytes, so we must have buffers to capture this.
@@ -36,36 +36,37 @@
  *  26-Nov-2016 1.2j  TRL - Changed radio to RFM95 LoRa
  *  20-Dec-2016 1.3k  TRL - Changed radio to RFM95 LoRa, make it work
  *  20-Dec-2016 1.3l  TRL - Changed radio freq to 928.5Mhz
- *  
+ *  04-Mar-2017 1.3m  TRL - Added code to set time on D6100
  *  
  *
- *  Notes:  1)  Tested with Arduino 1.8.0
+ *  Notes:  1)  Tested with Arduino 1.8.1
  *          2)  Testing using MoteinoMega LoRa Rev1 with RFM95
- *          3)  MySensor 2.1 30 Dec 2016
+ *          3)  MySensor 2.1.1 30 Dec 2016
  *
  * Todo:
- *  get time from MQTT and set time in D6100 
- *  some cleanup of code
+ *  done --> get time from MQTT and set time in D6100 
+ *  done --> some cleanup of code
  *  fix TX LED issue
+ *  If debug is on, then sending time to D6100 work, if off, sets wrong time... very odd!!
  *  
  */
 
 /* ************************************************************************************** */
 #include <string.h>
-//#include <Time.h>                                 // this is the Arduino time functions
 #include <TimeLib.h>
+#include <TimeAlarms.h>
 /* ************************************************************************************** */
 // Most of these items below need to be prior to #include <MySensor.h> 
 
 /*  Enable debug prints to serial monitor on port 0 */
-//#define MY_DEBUG            // used by MySensor
+#define MY_DEBUG            // used by MySensor
 //#define MY_SPECIAL_DEBUG
 //#define MY_DEBUG_VERBOSE_RFM95 
-//#define MY_DEBUG1           // used in this program, level 1 debug
+#define MY_DEBUG1           // used in this program, level 1 debug
 //#define MY_DEBUG2           // used in this program, level 2 debug
 
 #define SKETCHNAME    "Alarm D6100"
-#define SKETCHVERSION "1.3k RFM95"
+#define SKETCHVERSION "1.3m RFM95"
 
 /* ************************************************************************************** */
 // Enable and select radio type attached, coding rate and frequency
@@ -129,22 +130,22 @@
 #include <MySensors.h>                            // this need to be after most of the above settings
 
 /* ************************************************************************************** */
-unsigned long WatchDog_FREQUENCY = 60000;         // time to refresh gateway with alarm status ~1min
+unsigned long WatchDog_FREQUENCY = 300000;         // time to refresh gateway with alarm status ~1min = 60000, 5min = 300,000
 
-MyMessage VAR1Msg         (CHILD_ID,V_VAR1);      // 24
-MyMessage VAR2Msg         (CHILD_ID,V_VAR2);      // 25
-MyMessage VAR3Msg         (CHILD_ID,V_VAR3);      // 26
-MyMessage VAR4Msg         (CHILD_ID,V_VAR4);      // 27
-MyMessage TEXTMsg         (CHILD_ID,V_TEXT);      // 47
-MyMessage CUSTOMMsg       (CHILD_ID,V_CUSTOM);    // 48
+MyMessage VAR1Msg         (CHILD_ID,V_VAR1);      // 24 Zone number
+MyMessage VAR2Msg         (CHILD_ID,V_VAR2);      // 25 Type of alarm
+MyMessage VAR3Msg         (CHILD_ID,V_VAR3);      // 26 Text of Type
+MyMessage VAR4Msg         (CHILD_ID,V_VAR4);      // 27 Text of Zone
+MyMessage TEXTMsg         (CHILD_ID,V_TEXT);      // 47 Status messages
 
 /* ************************************************************************************** */
-#define DisplayID 0x37                      // this is the ID in hex of the control panel Display ID we will uses (0x30 --> 0x37)
-#define ControlPanelID 0x10                 // D6100
+#define DisplayID         0x37              // this is the ID in hex of the control panel Display ID we will uses (0x30 --> 0x37)
+#define ControlPanelID    0x10              // address in hex of the D6100
 
-static char inString [30] = "";             // used by serial command generator
-static char outString[40] = "";
-static char buffer [20];                    // a small working buffer
+static char MyBuffer [30];                  // a small working buffers
+static char inString[30];
+static char outString[30];
+static char SendBuffer[30];
 
 static char ApexBuffer [120] = "";          // a buffer to hold incoming serial message data from Apex D6100
 static char msgBuffer [120] = "";           // a buffer to hold the complete incoming message from Apex D6100
@@ -165,6 +166,11 @@ unsigned long lastSend = 0;
 
 unsigned int temp = 0;
 
+unsigned char SetTimeCtr = 0;               // Count of delay to send time to alarm 
+
+#define AlarmSendDelay            250       // delay on each send to alarm panel
+#define SendDelay                 250       // this is the delay after each send to MySensor
+#define AckFlag                   false     // if we are requesting an ACK from GW
 
 /* **************************************************************************** */
 /* This is the System Notification Report Messages table, used only to dispaly message on debug port */
@@ -178,23 +184,27 @@ static const char *types[] =  {"Exterior Instant", "Exterior Delay 1", "Exterior
               "Fall to Disarm", "Fail to Arm", "HWB416 Trouble", "HWB416 Trouble Restore", "Zone Open", "Zone Restore", "Zone Tamper", 
               "Zone Tamper Restore", "Radio Fail", "Radio Restore" };
 
-static const char *zone[] = {" 0 Null", " 1 Main Garage Interior Back Door", " 2 Master Bedroom Office North Door", " 3 Master Bedroom South Door",
-                             " 4 Family Room North Door", " 5 Family Room South-East Door", " 6 Family Room South-West Door", " 7 Front Door",
-                             " 8 Entry Foyer North Door", " 9 Entry Foyer North-Center Door", "10 Entry Foyer South-Center Door",
+static const char *zone[] = {"0 Zero", "1 Main Garage Interior Back Door", "2 Master Bedroom Office North Door", "3 Master Bedroom South Door",
+                             "4 Family Room North Door", "5 Family Room South-East Door", "6 Family Room South-West Door", "7 Front Door",
+                             "8 Entry Foyer North Door", "9 Entry Foyer North-Center Door", "10 Entry Foyer South-Center Door",
                              "11 Entry Foyer South Door", "12 Guest Bedroom East Door", "13 Guest Bedroom West Door", "14 Basement Door",
                              "15 Guest Office Door", "16 New Garage, Side South Door", "17 New Garage, Side North Door", "18 Main Garage North Door",
                              "19 Main Garage South Door", "20 New Garage, South Door's", "21 New Garage, North Door", "22 New Garage Interior Motion",
-                             "23 Pool Equipment Room Fire", "24 Patio Fire, North", "25 Main Garage South Fire", "26 Main Garage North Fire",
-                             "27 Kitchen Fire", "28 Kid's Wing Smoke", "29 Master Bedroom Smoke", "30 Guest Bedroom East Smoke",
-                             "31 Guest Bedroom West Smoke", "32 Guest Office North Smoke", "33 Guest Office South Smoke", "34 Basement Smoke",
-                             "35 Basement Theater Smoke", "36 Basement Utility Fire", "37 New Garage Fire", "38 New Garage Attic Fire",
-                             "39 New Garage Sprinkler Active, Fire", "40 Guest Wing Sprinkler Active, Fire", "41 4 Button Remote", "42 Studio Fire",
+                             "23 FIRE Pool Equipment Room", "24 FIRE Patio North", "25 FIRE Main Garage South", "26 FIRE Main Garage North",
+                             "27 FIRE Kitchen", "28 Smoke Kid's Wing", "29 Smoke Master Bedroom", "30 Smoke Guest Bedroom East",
+                             "31 Smoke Guest Bedroom West", "32 Smoke Guest Office North", "33 Smoke Guest Office South", "34 Smoke Basement",
+                             "35 Smoke Basement Theater", "36 FIRE Basement Utility", "37 FIRE New Garage", "38 FIRE New Garage Attic",
+                             "39 FIRE New Garage Sprinkler Active", "40 FIRE Guest Wing Sprinkler Active", "41 4 Button Remote", "42 FIRE Studio",
                              "43 Studio Interior Motion", "44 Bedroom East Interior Motion", "45 Bedroom West Interior Motion", "46 Kids Wing Interior Motion",
                              "47 Family Room Interior Motion", "48 Main Garage Interior Motion", "49 Master Bedroom Interior Motion",
-                             "50 Laundry Room Interior Motion", "51 Patio Fire, West", "52 Entry Foyer Motion", "53 LivingRoom Hallway Motion",
-                             "54 Chicken Coupe Door Open", "55 LivingRoom Smoke-Fire", "56 Kid's Wing Carbon Monoxide", "57 Master Bedroom Carbon Monoxide",
-                             "58 Guest Wing Office Carbon Monoxide", "59 Basement Carbon Monoxide", "60 Front Driveway Alarm", "61 Rear Driveway Alarm",
-                             "62 Zone 62", "63 Zone 63", "64 Zone 64", "65 Zone 65", "66 Zone 66", "67 Zone 67", "68 Zone 68", "69 Zone 69"                          
+                             "50 Laundry Room Interior Motion", "51 FIRE Patio West", "52 Entry Foyer Motion", "53 LivingRoom Hallway Motion",
+                             "54 Chicken Coupe Door Open", "55 FIRE Living Room", "56 Carbon Monoxide Kid's Wing", "57 Carbon Monoxide Master Bedroom",
+                             "58 Carbon Monoxide Guest Wing Office", "59 Carbon Monoxide Basement", "60 Front Driveway Alarm", "61 Rear Driveway Alarm",
+                             "62 Zone", "63 Zone", "64 Zone", "65 Zone", "66 Zone", "67 Zone", "68 Zone", "69 Zone", 
+                             "70 Zone", "71 Zone", "72 Zone", "73 Zone", "74 Zone", "75 Zone", "76 Zone", "77 Zone", "78 Zone", "79 Zone",
+                             "80 Zone", "81 Zone", "82 Zone", "83 Zone", "84 Zone", "85 Zone", "86 Zone", "87 Zone", "88 Zone", "89 Zone",
+                             "90 Zone", "91 Zone", "92 Zone", "93 Zone", 
+                             "94 Local Phone", "95 Phone Line Monitor", "96 Keypad", "97 Zone", "98 Zone", "99 System", "100 Zone"                           
                             };
 
 
@@ -203,12 +213,14 @@ void printDigits(int digits);
 void digitalClockDisplay();
 void Apex_Command (char *inString, char *outString);
 void serialEvent1();
-int checkCS (char *myString);
-int parseMsg (char *msgBuffer);
+int  checkCS (char *myString);
+int  parseMsg (char *msgBuffer);
 void receive(const MyMessage &message);
 void send2KeysD6100 (int temp);
 void send1KeyD6100 (int temp);
 void setTimeD6100 ();
+time_t GetTime();
+void SendTime();
 
 /* ************************************************************************************** */
                             
@@ -218,70 +230,112 @@ void setTimeD6100 ();
 /* **************************************************************************** */
 void setup()
 {
-  Serial.begin  (115200);                // Debug port
   Serial1.begin (1200);                  // Apex D6100 panel
 
- #ifdef __AVR_ATmega1284P__      // use for Moteino Mega Note: LED on Mega are 1 = on, 0 = off
+#ifdef __AVR_ATmega1284P__              // use for Moteino Mega Note: LED on Mega are 1 = on, 0 = off
   debug(PSTR(" ** Hello from the Alarm System on a MoteinoMega **\n") );
-  #else                         // we must have a Moteino
+  #else                                  // we must have a Moteino
   debug(PSTR(" ** Hello from the Alarm System on a Moteino **\n") );
 #endif
 
-
   const char compile_file[]  = __FILE__ ;
-  debug(PSTR(" %s %s\n"), SKETCHNAME, SKETCHVERSION);
-  debug(PSTR(" %s \n"), compile_file);
+  debug1(PSTR(" %s %s\n"), SKETCHNAME, SKETCHVERSION);
+  debug1(PSTR(" %s \n"), compile_file);
   const char compile_date[]  = __DATE__ ", " __TIME__;
-  debug(PSTR(" %s \n\n"), compile_date);
-  debug(PSTR(" Network ID: %u  Node ID: %u\n\n"), MY_RFM69_NETWORKID, MY_NODE_ID);
+  debug1(PSTR(" %s \n\n"), compile_date);
+  debug1(PSTR(" Node ID: %u\n\n"), MY_NODE_ID);
 
+  debug1(PSTR("*** Setting time from compile time\n"));
+  setDateTime(__DATE__, __TIME__);        // set clock to compile time
 
+//  Serial.print("Startup ");
+//  digitalClockDisplay();
 
-/* lets say a few words on alarm display at startup to be nice */
+    wait (10000);                         // wait for alarm to be ready on power up
+    
+/* lets say a few words on the alarm display at startup time to be nice */
+//  wait (1000);
+//  Serial1.println ("0Bsi04900B5");      // Control
+//  wait (500);
+//  Serial1.println ("0Bsi09100B8");      // Is
+//  wait (500);
+//  Serial1.println ("0Bsi27800B1");      // Active
+//  wait (500);
+
+  Serial1.println ("08as0064");         // request Alarm Status to clear buffer
   wait (1000);
-  Serial1.println ("0Bsi04900B5");      // Control
-  wait (500);
-  Serial1.println ("0Bsi09100B8");      // Is
-  wait (500);
-  Serial1.println ("0Bsi27800B1");      // Active
-  wait (500);
 
  // pinMode(LED1, OUTPUT);                 // Led
 
+// Lets request time for clock and set alarms
+  debug1(PSTR("*** Requesting time in Startup\n"));
+  requestTime();                        // Request time from controller on startup
+  setSyncInterval(3600);                // in sec,  once a day = 86400 sec, per hr = 3600
+  setSyncProvider(GetTime);             // set function to call when time sync is required 
+  wait (3000);
 
-//  setTime(21,12,15,02,9,2017);          // Set Arduino clock to this time manually for testing
-//  Serial.print("Time: ");
+//  Serial.print("Startup ");
 //  digitalClockDisplay();
-//  setTimeD6100();                       // Set D6100 clock
 
-//  debug1(PSTR("This is a test\n") );
-//  debug2(PSTR("Msg Length: %d\n"), msgLength);
+  SetTimeCtr = 6;                       // this will force time set to D6100 on startup
+  SendTime();                           // Send time to alarm if we have it
 
-}
+//  Alarm.alarmRepeat(8,30,0,SendTime);                   // 8:30am every day
+//  Alarm.alarmRepeat(17,45,0,SendTime);                  // 5:45pm every day 
+//  Alarm.timerRepeat(60, SendTime);                      // setup for test
+  Alarm.alarmRepeat(dowSunday, 16, 30, 00,SendTime);      // 16:30:00 every Sunday set alarm
+  
+} // end of setup
+
 
 /* ******************************************************************* */
-/* A utility function for testing the time function: prints preceding colon and leading 0 */
-void printDigits(int digits)
+// The time will be sent to the alarm if available
+void SendTime()
 {
-  Serial.print(":");
-  if(digits < 10) Serial.print('0');
-  Serial.print(digits);
+  SetTimeCtr++;
+  if ( SetTimeCtr >= 4)                     // we only want to send once every 4 weeks on sunday
+  {
+    SetTimeCtr = 0;
+    if (year() >= 2017)                     // only set time if we have a valid time
+    {
+      debug1(PSTR("*** Sending time to Alarm\n"));
+      setTimeD6100();                       // Set D6100 clock via keyboard
+    }
+  }
+}
+
+
+/* ******************************************************************* */
+time_t GetTime()
+{
+  requestTime();                         // Request time from controller
 }
 
 /* ******************************************************************* */
 /*  Print the time from Arduino internal clock */
 void digitalClockDisplay()
 {
-  Serial.print      (hour());
-  printDigits       (minute());
-  printDigits       (second());
-  Serial.print      (" ");
-  Serial.print      (day());
-  Serial.print      (" ");
-  Serial.print      (month());
-  Serial.print      (" ");
-  Serial.print      (year());
-  Serial.println();
+
+// The first debug1 statement below is broken, if we have two or more %s in the same line, the first one is repeted
+//Serial.print (dayStr(day()) );
+//Serial.println (monthStr(month()));
+//debug1(PSTR("Time: %d:%d:%02d %s %s %d\n"), hour(), minute(), second(), dayStr(day()), monthStr(month()), year() ); // <-- broken 
+ 
+  debug(PSTR("*** Time: %d:%d:%02d %d/%d/%d\n"), hour(), minute(), second(), day(), month(), year() );
+
+//  Serial.print("Time: ");
+//  Serial.print(hour());
+//  Serial.print(":");
+//  Serial.print(minute());
+//  Serial.print(":");
+//  Serial.print(second());
+//  Serial.print(" ");
+//  Serial.print(day());
+//  Serial.print("/");
+//  Serial.print(month());
+//  Serial.print("/");
+//  Serial.println(year());
+  
 }
 
 
@@ -289,27 +343,45 @@ void digitalClockDisplay()
 void presentation()  
 {
   // Send the sketch version information to the gateway and Controller
-  sendSketchInfo(SKETCHNAME, SKETCHVERSION);
-  wait (250);
-  
+  sendSketchInfo(SKETCHNAME, SKETCHVERSION, AckFlag);     wait (SendDelay);
+
   // Register this device as Custom sensor
-  present(CHILD_ID, S_CUSTOM);       // S_CUSTOM = 23
-  wait (250);
+  present(CHILD_ID, S_CUSTOM, "Alarm", AckFlag);  wait (SendDelay);             // S_CUSTOM = 23
 }
 
 /* **************************************************************************** */
 /* This builds a proper command for the Apex D6100 by adding the length, extra 00 and the Checksum to the message */
 void Apex_Command (char *inString, char *outString)
 {
-  sprintf (outString, "%02X", strlen (inString) + 6);   // get length of string
-  strcat  (outString, inString);                        // insert length at beginning of outString
+  char SendBuffer[40];
+  sprintf (outString, "%02X", strlen (inString) + 6);  // get length of string
+  strcat  (outString, inString);                       // insert length at beginning of outString
   strcat  (outString, "00");                            // add "00" to end of string
   int checksum = checkCS(outString);                    // compute CS
-  sprintf (buffer, "%02X", checksum);                   // add it as a string
-  strcat  (outString, buffer);                          // add it to outBuffer
-  debug1(PSTR("Cmd: %s\n"), outString);
-   
-  Serial1.println (outString);                          // send command to D6100
+  sprintf (SendBuffer, "%02X", checksum);               // add it as a string
+  strcat  (outString, SendBuffer);                      // add it to outBuffer
+  Serial1.println (outString);  wait (AlarmSendDelay);  // send command to D6100
+  debug1(PSTR("*** Cmd: %s\n"), outString);
+}
+
+/* **************************************************************************** */
+void send2KeysD6100 (int temp)
+{
+        sprintf (SendBuffer, "zk%02X%02X00%02d%02d", ControlPanelID, DisplayID, temp/10, temp/10);
+        strcpy(inString, SendBuffer );         
+        Apex_Command (inString, outString);           // send first key
+        
+        sprintf (SendBuffer, "zk%02X%02X00%02d%02d", ControlPanelID, DisplayID, temp % 10, temp % 10);
+        strcpy(inString, SendBuffer ); 
+        Apex_Command (inString, outString);           // send 2nd key     
+}
+
+/* **************************************************************************** */
+void send1KeyD6100 (int temp)
+{       
+        sprintf (SendBuffer, "zk%02X%02X00%02d%02d",ControlPanelID, DisplayID, temp % 10, temp % 10);
+        strcpy(inString, SendBuffer );            
+        Apex_Command (inString, outString);           // send first key
 }
 
 
@@ -317,7 +389,7 @@ void Apex_Command (char *inString, char *outString)
 /*
   SerialEvent occurs whenever new data comes in the
   hardware serial RX port.  This routine is run between each
-  time loop() runs, so using delay inside loop can delay
+  time loop() runs, so using any delay inside loop can delay
   response.  Multiple bytes of data may be available.
 */
 void serialEvent1()
@@ -361,34 +433,35 @@ int checkCS (char *myString)
   return checksum = ~(checksum) + 1;    // twos complement
 }
 
+
 /* **************************************************************************** */
-/* This will parse the incomming message and will validate the checksum */
+/* This will parse the incomming message from the alarm and will validate the checksum */
 int parseMsg (char *msgBuffer)
 {
   // lets parse the message data and then check the checksum...
 
-  buffer [0] = msgBuffer [0];
-  buffer [1] = msgBuffer [1];
-  msgLength = strtol (buffer, NULL, 16) - 4;      // this is the total length of the message
-  debug1(PSTR("Msg Length: %d\n"), msgLength);
+  MyBuffer [0] = msgBuffer [0];
+  MyBuffer [1] = msgBuffer [1];
+  msgLength = strtol (MyBuffer, NULL, 16) - 4;      // this is the total length of the message
+  debug2(PSTR("*** Msg Length: %d\n"), msgLength);
 
   msg [0] = msgBuffer [2];                        // lets get the message type
   msg [1] = msgBuffer [3];
   msg [2] = 0;
 
-  debug1(PSTR("Msg: %s\n"), msg);
+  debug2(PSTR("*** Msg: %s\n"), msg);
 
-  buffer [0] = msgBuffer [strlen(msgBuffer) - 2]; // let get the CS from the message
-  buffer [1] = msgBuffer [strlen(msgBuffer) - 1];
-  buffer [2] = 0;
-  msgCS = strtol (buffer, NULL, 16);              // this is the CS from message
+  MyBuffer [0] = msgBuffer [strlen(msgBuffer) - 2]; // let get the CS from the message
+  MyBuffer [1] = msgBuffer [strlen(msgBuffer) - 1];
+  MyBuffer [2] = 0;
+  msgCS = strtol (MyBuffer, NULL, 16);              // this is the CS from message
   
-  debug1(PSTR("Msg CS: %02X\n"), msgCS);
+  debug2(PSTR("*** Msg CS: %02X\n"), msgCS);
   
   msgBuffer[strlen(msgBuffer) - 2] = 0;           // remove the CS, we now have a copy of it
 
   newCS = checkCS(msgBuffer);                     // compute new checksum of message, without the original CS
-  debug1(PSTR("New CS: %02X\n"), newCS);
+  debug2(PSTR("*** New CS: %02X\n"), newCS);
 
   msgBuffer[strlen(msgBuffer) - 2] = 0;           // now remove the two 00 at end of message
 
@@ -401,67 +474,62 @@ int parseMsg (char *msgBuffer)
     }
     
     msgData[i - 4] = 0;                           // null terminate the string
-    debug1(PSTR("Data: %s\n"), msgData);
-    debug1(PSTR("Data Length: %d\n"), strlen(msgData));
+    debug2(PSTR("*** Data: %s\n"), msgData);
+    debug2(PSTR("*** Data Length: %d\n"), strlen(msgData));
     return 0;
   }
   
   else
   {
-    debug2(PSTR("Bad Checksum in Message\n"));
+    debug1(PSTR("*** Bad Checksum in Message\n"));
     return -1;
   }
 }
 
-/* **************************************************************************** */
-/* This is the callback for any mesages that are address to us */
+/****************** Message Receive Loop ***************************
+ * 
+ * This is the message receive loop, here we look for messages address to us 
+ * 
+ * ***************************************************************** */
+
 void receive(const MyMessage &message) 
 {
-   Serial.println("Received message from gw:");  
+   debug1(PSTR("*** Received message from gw"));  
 
   if (message.sensor == CHILD_ID )
   {
     if  (message.type==V_VAR1) 
       {
-        debug2(PSTR("Received V_VAR1 message from gw: %s\n"), message.getULong());
+        debug1(PSTR("*** Received V_VAR1 message: %lu\n"), message.getULong());
       }
     
      if ( message.type==V_VAR2) 
       {
-        debug2(PSTR("Received V_VAR2 message from gw: %s\n"), message.getULong());
+        debug1(PSTR("*** Received V_VAR2 message: %lu\n"), message.getULong());
       }
     
      if ( message.type==V_VAR3) 
       {
-        debug2(PSTR("Received V_VAR3 message from gw: %s\n"), message.getULong());
+        debug1(PSTR("*** Received V_VAR3 message: %lu\n"), message.getULong());
       }
 
      if ( message.type==V_VAR3) 
       {
-        debug2(PSTR("Received V_VAR4 message from gw: %s\n"), message.getULong());
+        debug1(PSTR("*** Received V_VAR4 message: %lu\n"), message.getULong());
       }
    }
 }
 
 /* **************************************************************************** */
-void send2KeysD6100 (int temp)
+/* receive the time from the gateway */
+void receiveTime(unsigned long ts)
 {
-        sprintf (buffer, "zk%02X%02X00%02d%02d",ControlPanelID, DisplayID, temp/10, temp/10);
-        strcpy(inString, buffer );            
-        Apex_Command (inString, outString);   // send first key
-        
-        sprintf (buffer, "zk%02X%02X00%02d%02d",ControlPanelID, DisplayID, temp % 10, temp % 10);
-        strcpy(inString, buffer ); 
-        Apex_Command (inString, outString);   // send 2nd key     
+  debug1(PSTR("*** Received Time from gw: %lu \n"), ts);
+  setTime(ts);                                            // Set from UNIX timestamp
+//  Serial.print("RX ");
+//  digitalClockDisplay();
 }
 
-/* **************************************************************************** */
-void send1KeyD6100 (int temp)
-{
-        sprintf (buffer, "zk%02X%02X00%02d%02d",ControlPanelID, DisplayID, temp % 10, temp % 10);
-        strcpy(inString, buffer );            
-        Apex_Command (inString, outString);   // send first key
-}
 
 /* **************************************************************************** */
 /* This function will emulate the keyboard and send the keystrokes needed to set the time in the D6100 
@@ -469,16 +537,16 @@ void send1KeyD6100 (int temp)
 */
 void setTimeD6100 ()
 {
-        Serial1.println ("12zk10370011110069");  // Send time mode 8-2 key to D6100
+        Serial1.println ("12zk10370011110069");     wait (AlarmSendDelay);   // Send time setup command to D6100 "8-2 keys"
         
 /* We need to send 4 digit time is 12 hr format HHMM */
         temp = hour ();
-        if ( temp > 12) temp = temp - 12;
+        if ( temp > 12) temp = temp - 12;    
         send2KeysD6100( temp );
         send2KeysD6100( minute() );
-
+//        debug1(PSTR("*** h:m %u:%02u\n"), temp, minute());
 /* We need to send 1 = AM, 2 = PM */
-        if ( isAM() )     send1KeyD6100 (1);    // Returns true if time now is AM 
+        if ( isAM() )     send1KeyD6100 (1);           // Returns true if time now is AM 
         else              send1KeyD6100 (2);
        
 /* We need to send the day of the week: 1 = Sunday, then month, day, 2 digit year */
@@ -486,29 +554,26 @@ void setTimeD6100 ()
         send2KeysD6100( month() );
         send2KeysD6100( day() );
         send2KeysD6100( year() - 2000 );
+//       debug1(PSTR("*** Date: %u %u %u %un\n"), weekday (), month(), day(), year() - 2000);
 }
 
 
 /* **************************************************************************** */
-/* **************************************************************************** */
+/* ************************* LOOP ********************************************* */
 /* **************************************************************************** */
 void loop()
 {
-
   _process ();
+  Alarm.delay(1);                               // required to sync alarm time
   
   currentTime = millis();                       // get the current time
   if (currentTime - lastSend > WatchDog_FREQUENCY)
   {
     lastSend = currentTime;
-
-//#ifdef MY_RFM69_Enable_ATC
-//    debug(PSTR("\n *** RSSI: %d  MY TX Pwr: %d\n\n"), _radio.getAckRSSI(), _radio._transmitLevel);
-//#endif
     
-    Serial1.println ("08as0064");             // Lets ask for the Alarm Status message as watchdowg
+    Serial1.println ("08as0064");               // Lets ask for the Alarm Status message as a watchdowg
  
-    // here we are building test messages for the D6100
+    /* here we are building test messages for the D6100 */
 
     // These were use in debug to have the D6100 alarm send us messages 
     // Serial1.println ("08as0064");            // Alarm Status
@@ -524,95 +589,143 @@ void loop()
 
   }
 
-/*  Lets see if we have a complete message */
+/*  Lets see if we have a complete message from alarm */
   if (stringComplete)
   {
     stringComplete = false;                      // yes, then clear the string complete flag
-    debug1(PSTR("We have a string: %s\n"), msgBuffer);
+    debug1(PSTR("*** We have a data from D6100: %s\n"), msgBuffer);
  
     if (parseMsg (msgBuffer) == 0)               // check for a valid message
     {
       if ( strcmp (msg, "NQ") == 0)              // NQ = System Event Notification
       {
-        debug2(PSTR("NQ = System Event Notification: %s\n"), msgData);
+        debug1(PSTR("*** NQ = System Event Notification: %s\n"), msgData);
 
-        buffer [0] = msgData [0];                 // let get the System Notification Report Type
-        buffer [1] = msgData [1];
-        buffer [2] = 0;
-        msgType = strtol (buffer, NULL, 16);
+        MyBuffer [0] = msgData [0];                 // let get the System Notification Report Type
+        MyBuffer [1] = msgData [1];
+        MyBuffer [2] = 0;
+        msgType = strtol (MyBuffer, NULL, 16);
                 
-        buffer [0] = msgData [2];                 // let get the zone
-        buffer [1] = msgData [3];
-        msgZone = (strtol (buffer, NULL, 16) +1); // Zone are reported offset by 1
+        MyBuffer [0] = msgData [2];                 // let get the zone
+        MyBuffer [1] = msgData [3];
+        msgZone = (strtol (MyBuffer, NULL, 16) +1); // Zone are reported offset by 1
 
-        debug2(PSTR("Msg Type: %d %s, Zone: %d\n"), msgType, types[msgType], msgZone);
-        debug2(PSTR("Zone Location: %d %s\n"), msgType, zone[msgZone]);
+        debug1(PSTR("*** Msg Type: %d %s, Zone: %d\n"), msgType, types[msgType], msgZone);
+        debug1(PSTR("*** Zone Location: %d %s\n"), msgType, zone[msgZone]);
         
-      /* Here we send a MySensor messages */
-        send(VAR1Msg.set((int) msgType, true));             // Send Message Type to gateway
-        wait (200);
-        send(VAR2Msg.set((int) msgZone, true));             // Send Zone to gateway
-        wait (200);  
-//        send(CUSTOMMsg.set(zone[msgZone], true));      // Send Zone text to gateway   
+      /* Here we send our MySensor messages to the gateway */
+        send(VAR1Msg.set((int) msgType), AckFlag);  wait(SendDelay);     // Send Message Type to gateway
+        send(VAR2Msg.set((int) msgZone), AckFlag);  wait(SendDelay);     // Send Zone to gateway
 
-//CSTRING sStr((char*)buffer);
- 
+        if (msgType > sizeof(types)/2) msgType = sizeof(types)/2 -1;
+        send(VAR3Msg.set(types[msgType]), AckFlag); wait(SendDelay);     // Send Zone type to gateway
+
+        if (msgZone > sizeof(zone)/2 ) msgZone = sizeof(zone)/2 -1;
+        send(VAR4Msg.set(zone[msgZone]), AckFlag);  wait(SendDelay);     // Send Zone text to gateway
       }
 
       else if ( strcmp (msg, "CS") == 0)          // CS = Control Channel Status
       {
-        debug2(PSTR("CS = Control Channel Status: %s\n"), msgData);
+        debug1(PSTR("*** CS = Control Channel Status: %s\n"), msgData);
       }
 
       else if ( strcmp (msg, "AS") == 0)           // AS = Alarm Status Report
       {
-       debug2(PSTR("AS = Alarm Status Report: %s\n"), msgData);
+       debug1(PSTR("*** AS = Alarm Status Report: %s\n"), msgData);
  
         switch (msgData [0])                      // for now we are only reporting Partition 1
         {
           case  'A':
-          send(TEXTMsg.set("Armed to Away"));     // Send to gateway
+          send(TEXTMsg.set("Armed to Away"), AckFlag);  wait(SendDelay);     // Send to gateway
           break;
 
           case  'H':
-          send(TEXTMsg.set("Armed to Home"), true);     // Send to gateway
+          send(TEXTMsg.set("Armed to Home"), AckFlag);  wait(SendDelay);     // Send to gateway
           break;
 
           case  'D':
-          send(TEXTMsg.set("Alarm is Disarmed"), true); // Send to gateway
+          send(TEXTMsg.set("Alarm is Disarmed"), AckFlag);  wait(SendDelay);  // Send to gateway
           break;   
         }
       }
 
       else if ( strcmp (msg, "ZS") == 0)           // ZS = Zone Status Report
       {
-        debug2(PSTR("ZS = Zone Status Report: %s\n"), msgData);
+        debug1(PSTR("*** ZS = Zone Status Report: %s\n"), msgData);
       }
 
       else if ( strcmp (msg, "ZP") == 0)           // ZP = Zone Partition Report
       {
-        debug2(PSTR("ZP = Zone Partition Report: %s\n"), msgData);
+        debug1(PSTR("*** ZP = Zone Partition Report: %s\n"), msgData);
       }
 
       else if ( strcmp (msg, "NK") == 0)           // NK = Keystroke Notification
       {
-        debug2(PSTR("NK = Keystroke Notification: %s\n"), msgData);
+        debug1(PSTR("*** NK = Keystroke Notification: %s\n"), msgData);
       }
 
       else if ( strcmp (msg, "LR") == 0)           // LR = Location Read
       {
-        debug2(PSTR("NK = Keystroke Notification: %s\n"), msgData);
+        debug1(PSTR("*** NK = Keystroke Notification: %s\n"), msgData);
       }
 
       else
       {
-        debug2(PSTR("Unknown Message: %s\n"), msgData);
+        debug1(PSTR("*** Unknown Message: %s\n"), msgData);
       }
 
     } // if (parseMsg (msgBuffer) == 0) 
 
   } // if (stringComplete)
 }
+
+
+/* This will take a compile string and convert it to a date time format for clock */
+
+uint8_t conv2d(const char* p)
+{
+    uint8_t v = 0;
+
+    if ('0' <= *p && *p <= '9')
+    {
+        v = *p - '0';
+    }
+
+    return 10 * v + *++p - '0';
+}
+
+void setDateTime(const char* date, const char* time)
+{
+    uint16_t year;
+    uint8_t month;
+    uint8_t day;
+    uint8_t hour;
+    uint8_t minute;
+    uint8_t second;
+
+    year = conv2d(date + 9);
+
+    switch (date[0])
+    {
+        case 'J': month = date[1] == 'a' ? 1 : month = date[2] == 'n' ? 6 : 7; break;
+        case 'F': month = 2; break;
+        case 'A': month = date[2] == 'r' ? 4 : 8; break;
+        case 'M': month = date[2] == 'r' ? 3 : 5; break;
+        case 'S': month = 9; break;
+        case 'O': month = 10; break;
+        case 'N': month = 11; break;
+        case 'D': month = 12; break;
+    }
+
+    day = conv2d(date + 4);
+    hour = conv2d(time);
+    minute = conv2d(time + 3);
+    second = conv2d(time + 6);
+
+    // setDateTime(year+2000, month, day, hour, minute, second);
+    setTime(hour,minute,second,day, month, year);
+}
+
 
 /* ************** The End ****************** */
 
