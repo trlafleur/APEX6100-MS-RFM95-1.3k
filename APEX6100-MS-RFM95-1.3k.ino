@@ -528,7 +528,7 @@ void receiveTime(unsigned long ts)
   //digitalClockDisplay();
   setTime(ts);                                            // save time to time of day clock from a UNIX timestamp
 
-  if ( (ts >= (oldTime + 600))  || ( (oldTime - 600) >= ts) )
+  if ( (ts >= (oldTime + 600))  || ( (oldTime - 600) >= ts) )     // 600sec = 10 min delta
     {
       debug1(PSTR("***** We should set time, we are off by: %ld Sec\n"), (ts - oldTime));
       // We will set the time at a reasonable time, like 4:28pm on sunday as to not wake anyone up...
