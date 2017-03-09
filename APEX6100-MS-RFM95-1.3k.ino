@@ -1,5 +1,5 @@
 /*
- *  Ver 1.3m  4 Mar 2017 TRL 
+ *  Ver 1.3n  8 Mar 2017 TRL 
  *  
  *  A program to control an APEX Destiny 6100(AN) Alarm panel. 
  *   This is running on a MoteinoMEGA, so we have lots of memory available
@@ -37,7 +37,7 @@
  *  20-Dec-2016 1.3k  TRL - Changed radio to RFM95 LoRa, make it work
  *  20-Dec-2016 1.3l  TRL - Changed radio freq to 928.5Mhz
  *  04-Mar-2017 1.3m  TRL - Added code to set time on D6100
- *  
+ *  08-Mar-2017 1.3n  TRL - Added time check for daylight saving time
  *
  *  Notes:  1)  Tested with Arduino 1.8.1
  *          2)  Testing using MoteinoMega LoRa Rev1 with RFM95
@@ -163,7 +163,7 @@ static int msgZone = 0;                     // Zone number from NQ message
 
 unsigned long currentTime = 0;              
 unsigned long lastSend = 0;
-
+time_t oldTime = 0;
 unsigned int temp = 0;
 
 unsigned char SetTimeCtr = 0;               // Count of delay to send time to alarm 
@@ -245,13 +245,14 @@ void setup()
   debug1(PSTR(" %s \n\n"), compile_date);
   debug1(PSTR(" Node ID: %u\n\n"), MY_NODE_ID);
 
+  debug1(PSTR("*** Requesting time in Startup\n"));
+  setSyncInterval(3600);                // in sec,  once a day = 86400 sec, per hr = 3600
+  setSyncProvider(GetTime);             // set function to call when time sync is required, this will request time 
+
   debug1(PSTR("*** Setting time from compile time\n"));
-  setDateTime(__DATE__, __TIME__);        // set clock to compile time
-
-//  Serial.print("Startup ");
-//  digitalClockDisplay();
-
-    wait (10000);                         // wait for alarm to be ready on power up
+  setDateTime(__DATE__, __TIME__);      // set clock to compile time
+  digitalClockDisplay();
+  wait (10000);                         // wait for alarm to be ready on power up
     
 /* lets say a few words on the alarm display at startup time to be nice */
 //  wait (1000);
@@ -268,10 +269,8 @@ void setup()
  // pinMode(LED1, OUTPUT);                 // Led
 
 // Lets request time for clock and set alarms
-  debug1(PSTR("*** Requesting time in Startup\n"));
-  requestTime();                        // Request time from controller on startup
-  setSyncInterval(3600);                // in sec,  once a day = 86400 sec, per hr = 3600
-  setSyncProvider(GetTime);             // set function to call when time sync is required 
+
+  //requestTime();                        // Request time from controller on startup
   wait (3000);
 
 //  Serial.print("Startup ");
@@ -525,9 +524,17 @@ void receive(const MyMessage &message)
 void receiveTime(unsigned long ts)
 {
   debug1(PSTR("*** Received Time from gw: %lu \n"), ts);
-  setTime(ts);                                            // Set from UNIX timestamp
-//  Serial.print("RX ");
-//  digitalClockDisplay();
+  oldTime = now();                                        // let's check for a large time delta, like daylight saving time
+  //digitalClockDisplay();
+  setTime(ts);                                            // save time to time of day clock from a UNIX timestamp
+
+  if ( (ts >= (oldTime + 600))  || ( (oldTime - 600) >= ts) )
+    {
+      debug1(PSTR("***** We should set time, we are off by: %ld Sec\n"), (ts - oldTime));
+      // We will set the time at a reasonable time, like 4:28pm on sunday as to not wake anyone up...
+      Alarm.alarmOnce(dowSunday, 16, 28, 00, SendTime);      // settime on next --> Sunday at 16:28:00);
+    }
+     digitalClockDisplay();
 }
 
 
